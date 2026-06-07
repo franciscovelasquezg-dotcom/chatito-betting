@@ -39,8 +39,20 @@ def _get(endpoint: str, params: dict) -> dict:
 
 
 def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -> list[dict]:
+    from datetime import timedelta
     target = target_date or date.today().isoformat()
+
+    # Si no hay partidos en la fecha exacta, buscar el día más próximo con partidos (hasta 7 días)
+    base = date.fromisoformat(target)
     data = _get("fixtures", {"date": target})
+    if not data.get("response"):
+        for delta in range(1, 8):
+            siguiente = (base + timedelta(days=delta)).isoformat()
+            data = _get("fixtures", {"date": siguiente})
+            if data.get("response"):
+                logger.info(f"Sin partidos el {target}, usando {siguiente}")
+                target = siguiente
+                break
     all_fixtures = data.get("response", [])
     logger.info(f"API devolvió {len(all_fixtures)} partidos para {target}")
 
