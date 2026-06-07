@@ -60,7 +60,7 @@ def responder(pregunta: str, contexto_datos: str = "") -> str:
 def detectar_intencion(texto: str) -> str:
     """
     Detecta qué quiere hacer el usuario.
-    Retorna: 'analizar_partido' | 'estadisticas' | 'recomendar' | 'picks' | 'chat'
+    Retorna: 'analizar_partido' | 'estadisticas' | 'recomendar' | 'picks_hoy' | 'picks_manana' | 'chat'
     """
     t = texto.lower()
     if " vs " in t or "contra" in t:
@@ -69,6 +69,9 @@ def detectar_intencion(texto: str) -> str:
         return "estadisticas"
     if any(w in t for w in ["elige", "elije", "recomienda", "cuál apostar", "vale la pena", "conviene"]):
         return "recomendar"
-    if any(w in t for w in ["picks", "hoy", "mañana", "manana", "partidos de"]):
-        return "picks"
+    # Mañana — detectar antes que "hoy"
+    if any(w in t for w in ["mañana", "manana", "tomorrow", "siguiente", "próximo", "proximo"]):
+        return "picks_manana"
+    if any(w in t for w in ["picks", "hoy", "partidos", "apuesta", "apuestas", "segur", "dame", "dame", "3 ", "cinco"]):
+        return "picks_hoy"
     return "chat"

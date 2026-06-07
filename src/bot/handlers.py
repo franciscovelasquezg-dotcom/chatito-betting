@@ -134,6 +134,26 @@ async def msg_libre(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     intencion = detectar_intencion(texto_lower)
 
+    # — Picks de mañana por texto libre —
+    if intencion == "picks_manana":
+        from datetime import date, timedelta
+        manana = (date.today() + timedelta(days=1)).isoformat()
+        await update.message.reply_text(
+            f"⏳ Buscando los mejores partidos para mañana...\n_Puede tardar 1-2 minutos_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await _enviar_picks_fecha(update, manana)
+        return
+
+    # — Picks de hoy por texto libre —
+    if intencion == "picks_hoy":
+        await update.message.reply_text(
+            "⏳ Buscando los mejores partidos de hoy...\n_Puede tardar 1-2 minutos_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await _enviar_picks_fecha(update, None)
+        return
+
     # — Saludos simples — respuesta rápida sin API
     if any(w in texto_lower for w in ["hola", "hi", "buenas", "hey", "ola"]):
         await update.message.reply_text(
