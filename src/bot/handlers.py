@@ -6,7 +6,7 @@ Handlers de comandos del bot Telegram.
 import os
 import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 from loguru import logger
 from dotenv import load_dotenv
@@ -18,8 +18,31 @@ from src.bot.telegram_bot import format_daily_message, format_pick
 load_dotenv()
 chatito = Chatito()
 
+# Chat IDs autorizados (privado)
+_ALLOWED = set(
+    int(x.strip())
+    for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",")
+    if x.strip()
+)
+
+def _autorizado(update: Update) -> bool:
+    return not _ALLOWED or update.message.chat_id in _ALLOWED
+
+# Memoria de últimos picks enviados por chat_id
+_ultimos_picks: dict[int, list] = {}
+# Historial de conversación por chat_id
+_historial: dict[int, list[dict]] = {}
+
+
+async def _bloquear(update: Update) -> bool:
+    if not _autorizado(update):
+        await update.message.reply_text("⛔ Bot privado.")
+        return True
+    return False
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _bloquear(update): return
     await update.message.reply_text(
         "🤖 *Hola, soy Chatito* — tu analista de apuestas de fútbol.\n\n"
         "📋 *Comandos disponibles:*\n"
@@ -33,10 +56,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _bloquear(update): return
     await cmd_start(update, context)
 
 
 async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _bloquear(update): return
     if not context.args:
         await update.message.reply_text(
             "⚠️ Uso correcto:\n`/analizar Equipo Local vs Equipo Visitante`\n\n"
@@ -90,7 +115,97 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"❌ Error al analizar: {str(e)[:200]}")
 
 
+async def msg_libre(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _bloquear(update): return
+    """Responde a mensajes de texto libre usando Claude como cerebro."""
+    from src.analyst.cerebro import detectar_intencion, responder
+    from src.data.api_football import search_fixture_by_teams, build_match_data
+
+    texto = update.message.text.strip()
+    texto_lower = texto.lower()
+    chat_id = update.message.chat_id
+
+    # Guardar en historial
+    hist = _historial.setdefault(chat_id, [])
+    hist.append({"role": "user", "content": texto})
+    if len(hist) > 10:
+        hist.pop(0)
+
+    intencion = detectar_intencion(texto_lower)
+
+    # — Saludos simples — respuesta rápida sin API
+    if any(w in texto_lower for w in ["hola", "hi", "buenas", "hey", "ola"]):
+        await update.message.reply_text(
+            "👋 ¡Hola! Soy *Chatito*, tu analista de apuestas.\n\n"
+            "/picks — mejores de hoy\n"
+            "/manana — mejores de mañana\n"
+            "/analizar `Local vs Visitante` — análisis específico\n\n"
+            "O escríbeme directamente, por ejemplo:\n_\"analiza Argentina vs Honduras\"_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # — Recomendar 3 de los últimos picks —
+    if intencion == "recomendar":
+        picks = _ultimos_picks.get(chat_id)
+        if not picks:
+            await update.message.reply_text(
+                "🎯 Primero necesito analizar los partidos.\nEscribe /picks o /manana.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        top3 = picks[:3]
+        contexto = "Últimos picks analizados:\n" + "\n".join(
+            f"- {p.home_team} vs {p.away_team}: pick={p.recommendation}, score={p.confidence_score}, cuota={p.betano_odds}, value={p.value_pct}%"
+            for p in top3
+        )
+        respuesta = await asyncio.to_thread(responder, texto, contexto)
+        await update.message.reply_text(respuesta)
+        return
+
+    # — Analizar partido específico —
+    if intencion == "analizar_partido" or " vs " in texto_lower:
+        partes = texto_lower.split(" vs ")
+        local = partes[0].replace("analiza", "").replace("analizar", "").strip().title()
+        visitante = partes[1].strip().title()
+        await update.message.reply_text(f"🔍 Buscando *{local} vs {visitante}*...", parse_mode=ParseMode.MARKDOWN)
+        try:
+            fixture = await asyncio.to_thread(search_fixture_by_teams, local, visitante)
+            if not fixture:
+                respuesta = await asyncio.to_thread(
+                    responder,
+                    f"No encontré el partido {local} vs {visitante} en los próximos 7 días. ¿Qué le digo al usuario?",
+                    ""
+                )
+                await update.message.reply_text(respuesta)
+                return
+            league_id = fixture["league"]["id"]
+            match_data = await asyncio.to_thread(build_match_data, fixture, league_id)
+            if match_data:
+                result = chatito.analyze(match_data)
+                reporte = _format_analisis(match_data, result)
+                await update.message.reply_text(reporte, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.error(f"Error analizando partido: {e}")
+            await update.message.reply_text("❌ Error buscando el partido. Intenta con /analizar Equipo1 vs Equipo2")
+        return
+
+    # — Cualquier otra pregunta — Claude responde con contexto
+    contexto = ""
+    picks = _ultimos_picks.get(chat_id)
+    if picks:
+        contexto = "Últimos picks analizados:\n" + "\n".join(
+            f"- {p.home_team} vs {p.away_team}: {p.recommendation}, score={p.confidence_score}"
+            for p in picks
+        )
+
+    await update.message.reply_text("💭 _Analizando..._", parse_mode=ParseMode.MARKDOWN)
+    respuesta = await asyncio.to_thread(responder, texto, contexto)
+    await update.message.reply_text(respuesta)
+
+
 async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _bloquear(update): return
     await update.message.reply_text(
         "⏳ Analizando los mejores partidos de hoy...\n_Puede tardar 1-2 minutos_",
         parse_mode=ParseMode.MARKDOWN,
@@ -99,6 +214,7 @@ async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_manana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _bloquear(update): return
     from datetime import date, timedelta
     manana = (date.today() + timedelta(days=1)).isoformat()
     await update.message.reply_text(
@@ -150,8 +266,15 @@ async def _enviar_picks_fecha(update: Update, fecha: str | None) -> None:
             )
             return
 
+        # Guardar en memoria para poder recomendar 3 después
+        _ultimos_picks[update.message.chat_id] = top
+
         mensaje = format_daily_message(top)
         await update.message.reply_text(mensaje, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "💬 Escríbeme _\"elige 3\"_ y te digo cuáles apostar.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
     except Exception as e:
         logger.error(f"Error en picks por fecha: {e}")
@@ -226,6 +349,7 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("analizar", cmd_analizar))
     app.add_handler(CommandHandler("picks", cmd_picks))
     app.add_handler(CommandHandler("manana", cmd_manana))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_libre))
 
     logger.info("Bot Chatito escuchando comandos...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

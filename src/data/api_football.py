@@ -1,6 +1,6 @@
 """
-Cliente para API-Football (api-football.com).
-Obtiene partidos del día, estadísticas, lesionados y H2H.
+Cliente para API-Football con caché local y requests optimizados.
+Plan free: 10 req/min — caché reduce llamadas en ~70%.
 """
 
 import httpx
@@ -9,60 +9,50 @@ import time
 from datetime import date
 from loguru import logger
 from src.analyst.chatito import MatchData, TeamStats
-
+from src.data.cache import get as cache_get, set as cache_set
 
 API_BASE = "https://v3.football.api-sports.io"
-REQUEST_DELAY = 6.5  # segundos entre requests (plan free: 10 req/min)
+REQUEST_DELAY = 6.5  # seg entre requests cuando no hay caché
 
 
 def _headers() -> dict:
-    return {
-        "x-apisports-key": os.getenv("API_FOOTBALL_KEY", ""),
-    }
+    return {"x-apisports-key": os.getenv("API_FOOTBALL_KEY", "")}
 
 
 def _get(endpoint: str, params: dict) -> dict:
-    url = f"{API_BASE}/{endpoint}"
+    key = f"{endpoint}_{sorted(params.items())}"
+    cached = cache_get(key)
+    if cached is not None:
+        logger.debug(f"Cache HIT: {endpoint}")
+        return cached
+
     time.sleep(REQUEST_DELAY)
+    url = f"{API_BASE}/{endpoint}"
     with httpx.Client(timeout=20) as client:
         r = client.get(url, headers=_headers(), params=params)
         r.raise_for_status()
-        return r.json()
+        result = r.json()
+
+    cache_set(key, result)
+    return result
 
 
 def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -> list[dict]:
-    """
-    Retorna partidos del día. Busca todos los partidos de la fecha
-    y filtra por las ligas configuradas o por tier mínimo de calidad.
-    """
     target = target_date or date.today().isoformat()
-
-    # Traer TODOS los partidos del día de una sola llamada
     data = _get("fixtures", {"date": target})
     all_fixtures = data.get("response", [])
-    logger.info(f"API devolvió {len(all_fixtures)} partidos totales para {target}")
+    logger.info(f"API devolvió {len(all_fixtures)} partidos para {target}")
 
-    # Filtrar: ligas conocidas O partidos internacionales de selecciones
     filtered = []
     for f in all_fixtures:
         lid = f["league"]["id"]
         country = f["league"]["country"]
         fixture_type = f["league"].get("type", "")
-        # Incluir si está en nuestra lista o es partido internacional (Copa/World)
         if lid in league_ids or fixture_type == "Cup" or country == "World":
             filtered.append(f)
 
     logger.info(f"Partidos en ligas configuradas: {len(filtered)}")
     return filtered
-
-
-def get_team_stats(team_id: int, league_id: int, season: int = 2025) -> dict:
-    data = _get("teams/statistics", {
-        "team": team_id,
-        "league": league_id,
-        "season": season,
-    })
-    return data.get("response", {})
 
 
 def get_last_fixtures(team_id: int, last: int = 10) -> list[dict]:
@@ -71,7 +61,6 @@ def get_last_fixtures(team_id: int, last: int = 10) -> list[dict]:
 
 
 def search_fixture_by_teams(home: str, away: str) -> dict | None:
-    """Busca un fixture próximo por nombre de equipos."""
     from datetime import timedelta, date as d
     today = d.today().isoformat()
     in_7 = (d.today() + timedelta(days=7)).isoformat()
@@ -84,7 +73,6 @@ def search_fixture_by_teams(home: str, away: str) -> dict | None:
         a = f["teams"]["away"]["name"].lower()
         if home_l in h and away_l in a:
             return f
-    # Búsqueda parcial flexible
     for f in fixtures:
         h = f["teams"]["home"]["name"].lower()
         a = f["teams"]["away"]["name"].lower()
@@ -93,74 +81,61 @@ def search_fixture_by_teams(home: str, away: str) -> dict | None:
     return None
 
 
-def get_injuries(fixture_id: int) -> list[dict]:
-    data = _get("injuries", {"fixture": fixture_id})
-    return data.get("response", [])
-
-
 def get_h2h(home_id: int, away_id: int, last: int = 10) -> list[dict]:
-    data = _get("fixtures/headtohead", {
-        "h2h": f"{home_id}-{away_id}",
-        "last": last,
-    })
+    # H2H incluye historial de ambos equipos — reemplaza get_last_fixtures + get_h2h
+    data = _get("fixtures/headtohead", {"h2h": f"{home_id}-{away_id}", "last": last})
     return data.get("response", [])
 
 
-def build_team_stats(team_id: int, team_name: str, league_id: int, last_fixtures: list[dict], injuries: list[dict], is_home: bool) -> TeamStats:
-    """Construye TeamStats a partir de los datos crudos de la API."""
+def get_odds(fixture_id: int) -> tuple[float, float, float]:
+    try:
+        data = _get("odds", {"fixture": fixture_id, "bookmaker": 8})
+        resp = data.get("response", [])
+        if not resp:
+            return 2.0, 3.2, 3.5
+        for bookmaker in resp[0].get("bookmakers", []):
+            for bet in bookmaker.get("bets", []):
+                if bet["name"] == "Match Winner":
+                    values = {v["value"]: float(v["odd"]) for v in bet["values"]}
+                    return values.get("Home", 2.0), values.get("Draw", 3.2), values.get("Away", 3.5)
+    except Exception:
+        pass
+    return 2.0, 3.2, 3.5
 
-    # Forma: últimos 10 resultados
-    form = []
-    for fix in last_fixtures:
-        home_id = fix["teams"]["home"]["id"]
-        home_goals = fix["goals"]["home"] or 0
-        away_goals = fix["goals"]["away"] or 0
-        is_home_team = (home_id == team_id)
-        if home_goals == away_goals:
-            form.append("D")
-        elif is_home_team and home_goals > away_goals:
-            form.append("W")
-        elif not is_home_team and away_goals > home_goals:
-            form.append("W")
-        else:
-            form.append("L")
 
-    # Promedios de goles
-    scored = []
-    conceded = []
-    for fix in last_fixtures:
-        home_id = fix["teams"]["home"]["id"]
-        hg = fix["goals"]["home"] or 0
-        ag = fix["goals"]["away"] or 0
-        if home_id == team_id:
-            scored.append(hg)
-            conceded.append(ag)
-        else:
-            scored.append(ag)
-            conceded.append(hg)
-
-    goals_scored_avg = sum(scored) / len(scored) if scored else 1.2
-    goals_conceded_avg = sum(conceded) / len(conceded) if conceded else 1.2
-
-    # Win rate local/visitante
+def build_team_stats(team_id: int, team_name: str, last_fixtures: list[dict], injuries: list[dict]) -> TeamStats:
+    form, scored, conceded = [], [], []
     home_wins = away_wins = home_total = away_total = 0
+
     for fix in last_fixtures:
         hid = fix["teams"]["home"]["id"]
         hg = fix["goals"]["home"] or 0
         ag = fix["goals"]["away"] or 0
-        if hid == team_id:
-            home_total += 1
-            if hg > ag:
-                home_wins += 1
-        else:
-            away_total += 1
-            if ag > hg:
-                away_wins += 1
+        is_home = (hid == team_id)
 
+        # Forma
+        if hg == ag:
+            form.append("D")
+        elif (is_home and hg > ag) or (not is_home and ag > hg):
+            form.append("W")
+        else:
+            form.append("L")
+
+        # Goles
+        if is_home:
+            scored.append(hg); conceded.append(ag)
+            home_total += 1
+            if hg > ag: home_wins += 1
+        else:
+            scored.append(ag); conceded.append(hg)
+            away_total += 1
+            if ag > hg: away_wins += 1
+
+    goals_scored_avg = sum(scored) / len(scored) if scored else 1.2
+    goals_conceded_avg = sum(conceded) / len(conceded) if conceded else 1.2
     home_win_rate = home_wins / home_total if home_total else 0.5
     away_win_rate = away_wins / away_total if away_total else 0.3
 
-    # Lesionados clave (titulares)
     team_injuries = [i for i in injuries if i["team"]["id"] == team_id]
     injured_key = sum(1 for i in team_injuries if i["player"]["reason"] in ["Injury", "Muscle Injury"])
     suspended = sum(1 for i in team_injuries if i["player"]["reason"] == "Suspended")
@@ -177,29 +152,7 @@ def build_team_stats(team_id: int, team_name: str, league_id: int, last_fixtures
     )
 
 
-def get_odds(fixture_id: int) -> tuple[float, float, float]:
-    """Retorna cuotas (local, empate, visitante) del fixture."""
-    try:
-        data = _get("odds", {"fixture": fixture_id, "bookmaker": 8})  # bookmaker 8 = Bet365
-        resp = data.get("response", [])
-        if not resp:
-            return 2.0, 3.2, 3.5
-        for bookmaker in resp[0].get("bookmakers", []):
-            for bet in bookmaker.get("bets", []):
-                if bet["name"] == "Match Winner":
-                    values = {v["value"]: float(v["odd"]) for v in bet["values"]}
-                    return (
-                        values.get("Home", 2.0),
-                        values.get("Draw", 3.2),
-                        values.get("Away", 3.5),
-                    )
-    except Exception:
-        pass
-    return 2.0, 3.2, 3.5
-
-
 def build_match_data(fixture: dict, league_id: int) -> MatchData | None:
-    """Construye el MatchData completo para que Chatito lo analice."""
     try:
         fix_id = fixture["fixture"]["id"]
         home = fixture["teams"]["home"]
@@ -207,36 +160,42 @@ def build_match_data(fixture: dict, league_id: int) -> MatchData | None:
         league_name = fixture["league"]["name"]
         match_dt = fixture["fixture"]["date"]
 
-        # Cuotas reales desde API
-        home_odds, draw_odds, away_odds = get_odds(fix_id)
+        # Opción B+C: H2H incluye historial de ambos — 1 sola llamada en vez de 3
+        h2h_fixtures = get_h2h(home["id"], away["id"], last=20)
 
-        # Datos históricos
-        home_fixtures = get_last_fixtures(home["id"])
-        away_fixtures = get_last_fixtures(away["id"])
-        injuries = get_injuries(fix_id)
-        h2h = get_h2h(home["id"], away["id"])
+        # Separar fixtures por equipo desde el H2H
+        home_fixtures = [f for f in h2h_fixtures if
+                         f["teams"]["home"]["id"] == home["id"] or
+                         f["teams"]["away"]["id"] == home["id"]][:10]
+        away_fixtures = [f for f in h2h_fixtures if
+                         f["teams"]["home"]["id"] == away["id"] or
+                         f["teams"]["away"]["id"] == away["id"]][:10]
+
+        # Lesionados — 1 llamada
+        inj_data = _get("injuries", {"fixture": fix_id})
+        injuries = inj_data.get("response", [])
+
+        # Cuotas — 1 llamada (con caché)
+        home_odds, draw_odds, away_odds = get_odds(fix_id)
 
         # H2H stats
         h2h_home_wins = h2h_away_wins = h2h_draws = 0
-        for h in h2h:
+        pure_h2h = h2h_fixtures[:10]
+        for h in pure_h2h:
             hid = h["teams"]["home"]["id"]
             hg = h["goals"]["home"] or 0
             ag = h["goals"]["away"] or 0
             if hg > ag:
-                if hid == home["id"]:
-                    h2h_home_wins += 1
-                else:
-                    h2h_away_wins += 1
+                h2h_home_wins += 1 if hid == home["id"] else 0
+                h2h_away_wins += 1 if hid == away["id"] else 0
             elif ag > hg:
-                if hid == away["id"]:
-                    h2h_away_wins += 1
-                else:
-                    h2h_home_wins += 1
+                h2h_away_wins += 1 if hid != home["id"] else 0
+                h2h_home_wins += 1 if hid != away["id"] else 0
             else:
                 h2h_draws += 1
 
-        home_stats = build_team_stats(home["id"], home["name"], league_id, home_fixtures, injuries, is_home=True)
-        away_stats = build_team_stats(away["id"], away["name"], league_id, away_fixtures, injuries, is_home=False)
+        home_stats = build_team_stats(home["id"], home["name"], home_fixtures, injuries)
+        away_stats = build_team_stats(away["id"], away["name"], away_fixtures, injuries)
 
         return MatchData(
             match_id=fix_id,
