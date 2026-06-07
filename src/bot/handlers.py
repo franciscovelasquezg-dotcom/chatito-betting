@@ -50,6 +50,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/picks — top 5 mejores partidos de hoy\n"
         "/manana — top 5 mejores partidos de mañana\n"
         "/analizar `Local vs Visitante` — análisis detallado de un partido\n"
+        "/status — consumo de API y estado del sistema\n"
         "/ayuda — ver esta guía\n\n"
         "_Ejemplo: /analizar Real Madrid vs Barcelona_",
         parse_mode=ParseMode.MARKDOWN,
@@ -225,6 +226,85 @@ async def msg_libre(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(respuesta)
 
 
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _bloquear(update): return
+    import httpx, time
+    from pathlib import Path
+
+    await update.message.reply_text("🔍 _Consultando estado..._", parse_mode=ParseMode.MARKDOWN)
+
+    lines = ["🤖 *CHATITO — ESTADO DEL SISTEMA*", "━━━━━━━━━━━━━━━━━━━━━"]
+
+    # API-Football status
+    try:
+        key = os.getenv("API_FOOTBALL_KEY", "")
+        r = httpx.get(
+            "https://v3.football.api-sports.io/status",
+            headers={"x-apisports-key": key},
+            timeout=10,
+        )
+        resp = r.json().get("response", {})
+        reqs = resp.get("requests", {})
+        used = reqs.get("current", "?")
+        limit = reqs.get("limit_day", "?")
+        remaining = (limit - used) if isinstance(limit, int) and isinstance(used, int) else "?"
+        pct = round(used / limit * 100) if isinstance(limit, int) and limit > 0 else "?"
+        bar_filled = int(pct / 10) if isinstance(pct, int) else 0
+        bar = "█" * bar_filled + "░" * (10 - bar_filled)
+        lines += [
+            "",
+            "📡 *API-Football*",
+            f"  Usadas hoy: *{used} / {limit}*",
+            f"  Restantes: *{remaining}*",
+            f"  [{bar}] {pct}%",
+        ]
+        if isinstance(remaining, int) and remaining < 20:
+            lines.append("  ⚠️ _Cuota casi agotada — rotar key_")
+    except Exception as e:
+        logger.error(f"Status API-Football: {e}")
+        lines.append("\n📡 *API-Football:* ❌ No se pudo consultar")
+
+    # Cache local
+    try:
+        cache_dir = Path("cache")
+        if cache_dir.exists():
+            files = list(cache_dir.glob("*.json"))
+            total_kb = sum(f.stat().st_size for f in files) / 1024
+            lines += [
+                "",
+                "💾 *Caché local*",
+                f"  Entradas: *{len(files)}*",
+                f"  Tamaño: *{total_kb:.1f} KB*",
+            ]
+    except Exception:
+        pass
+
+    # Keys configuradas
+    keys_ok = []
+    keys_missing = []
+    for var in ["TELEGRAM_BOT_TOKEN", "API_FOOTBALL_KEY", "ANTHROPIC_API_KEY"]:
+        val = os.getenv(var, "")
+        if val and val not in ("COMPLETAR", ""):
+            keys_ok.append(var.replace("_KEY", "").replace("_TOKEN", "").replace("_", " ").title())
+        else:
+            keys_missing.append(var)
+
+    lines += ["", "🔑 *Keys configuradas*"]
+    for k in keys_ok:
+        lines.append(f"  ✅ {k}")
+    for k in keys_missing:
+        lines.append(f"  ❌ {k} faltante")
+
+    # Keys de respaldo
+    backup_keys = sum(1 for i in range(2, 10) if os.getenv(f"API_FOOTBALL_KEY_{i}", ""))
+    if backup_keys:
+        lines.append(f"  🔄 {backup_keys} key(s) de respaldo configuradas")
+
+    lines += ["", "━━━━━━━━━━━━━━━━━━━━━", "_Para rotar key: edita /etc/chatito.env en el VPS_"]
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
 async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _bloquear(update): return
     await update.message.reply_text(
@@ -370,6 +450,7 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("analizar", cmd_analizar))
     app.add_handler(CommandHandler("picks", cmd_picks))
     app.add_handler(CommandHandler("manana", cmd_manana))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_libre))
 
     logger.info("Bot Chatito escuchando comandos...")
