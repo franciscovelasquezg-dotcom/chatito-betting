@@ -125,12 +125,18 @@ def main() -> None:
     logger.info(f"Chatito iniciado en modo PICKS DIARIOS — envío a las {hora}")
     schedule.every().day.at(hora).do(run_analysis)
 
-    # Modo ambos: picks diarios + bot interactivo en paralelo
+    # Modo ambos: schedule corre en background, bot en thread principal
     if modo == "ambos":
         import threading
         logger.info("Chatito iniciado en modo AMBOS (picks + bot interactivo)")
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
+        def _schedule_loop():
+            while True:
+                schedule.run_pending()
+                time.sleep(60)
+        t = threading.Thread(target=_schedule_loop, daemon=True)
+        t.start()
+        run_bot()  # bot corre en thread principal
+        return
 
     while True:
         schedule.run_pending()
