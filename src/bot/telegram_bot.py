@@ -12,6 +12,7 @@ from src.analyst.chatito import PickResult
 
 
 def format_estrella(pick: PickResult) -> str:
+    stats = _stats_line(pick)
     return (
         "🌟 *PICK ESTRELLA DEL DÍA* 🌟\n"
         "╔══════════════════════╗\n"
@@ -23,10 +24,29 @@ def format_estrella(pick: PickResult) -> str:
         f"  Value: *+{pick.value_pct}%* 🔥\n"
         f"  🕐 {pick.match_datetime[:16].replace('T', ' ')}\n"
         "╚══════════════════════╝"
+        f"{stats}"
     )
 
 
+def _stats_line(pick: PickResult) -> str:
+    s = pick.stats_summary
+    if not s:
+        return ""
+    home_form = " ".join({"W": "✅", "D": "➖", "L": "❌"}.get(r, "?") for r in (s.get("forma_home") or []))
+    away_form = " ".join({"W": "✅", "D": "➖", "L": "❌"}.get(r, "?") for r in (s.get("forma_away") or []))
+    lines = [
+        f"  📋 Forma: {home_form} | {away_form}",
+        f"  ⚽ Goles/partido: {s.get('goles_favor_home', '?')} vs {s.get('goles_favor_away', '?')}",
+        f"  🔝 +2.5 goles: {s.get('over25_home', '?')}% / {s.get('over25_away', '?')}%",
+        f"  🎯 BTTS: {s.get('btts_home', '?')}% / {s.get('btts_away', '?')}%",
+        f"  🚩 Corners: {s.get('corners_home', '?')} / {s.get('corners_away', '?')} prom",
+        f"  🟨 Amarillas: {s.get('yellows_home', '?')} / {s.get('yellows_away', '?')} prom",
+    ]
+    return "\n" + "\n".join(lines)
+
+
 def format_pick(pick: PickResult, rank: int) -> str:
+    stats = _stats_line(pick)
     return (
         f"{pick.emoji} *#{rank} — {pick.league}*\n"
         f"🏟️ {pick.home_team} vs {pick.away_team}\n"
@@ -36,6 +56,7 @@ def format_pick(pick: PickResult, rank: int) -> str:
         f"📊 Chatito: {pick.chatito_prob}% | Betano: {pick.implied_prob_betano}%\n"
         f"⚡ Value: *+{pick.value_pct}%*\n"
         f"🕐 {pick.match_datetime[:16].replace('T', ' ')}"
+        f"{stats}"
     )
 
 

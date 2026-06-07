@@ -15,27 +15,84 @@ from src.data.cache import get as cache_get, set as cache_set
 API_BASE = "https://v3.football.api-sports.io"
 REQUEST_DELAY = 6.5  # seg entre requests cuando no hay caché
 
+# Pool de API keys — rota automáticamente cuando una se agota
+_api_keys: list[str] = []
+_current_key_idx = 0
+
+def _load_keys() -> list[str]:
+    keys = []
+    # Key principal
+    k = os.getenv("API_FOOTBALL_KEY", "").strip()
+    if k:
+        keys.append(k)
+    # Keys de respaldo: API_FOOTBALL_KEY_2, API_FOOTBALL_KEY_3, etc.
+    for i in range(2, 10):
+        k = os.getenv(f"API_FOOTBALL_KEY_{i}", "").strip()
+        if k:
+            keys.append(k)
+    return keys
+
+
+def _current_key() -> str:
+    global _api_keys
+    if not _api_keys:
+        _api_keys = _load_keys()
+    if not _api_keys:
+        return ""
+    return _api_keys[_current_key_idx % len(_api_keys)]
+
+
+def _rotate_key() -> bool:
+    global _current_key_idx, _api_keys
+    if not _api_keys:
+        _api_keys = _load_keys()
+    next_idx = _current_key_idx + 1
+    if next_idx >= len(_api_keys):
+        logger.error("Todas las API keys agotadas por hoy")
+        return False
+    _current_key_idx = next_idx
+    logger.warning(f"API key agotada — rotando a key #{_current_key_idx + 1}")
+    return True
+
 
 def _headers() -> dict:
-    return {"x-apisports-key": os.getenv("API_FOOTBALL_KEY", "")}
+    return {"x-apisports-key": _current_key()}
 
 
 def _get(endpoint: str, params: dict) -> dict:
-    key = f"{endpoint}_{sorted(params.items())}"
-    cached = cache_get(key)
+    cache_key = f"{endpoint}_{sorted(params.items())}"
+    cached = cache_get(cache_key)
     if cached is not None:
         logger.debug(f"Cache HIT: {endpoint}")
         return cached
 
     time.sleep(REQUEST_DELAY)
     url = f"{API_BASE}/{endpoint}"
-    with httpx.Client(timeout=20) as client:
-        r = client.get(url, headers=_headers(), params=params)
-        r.raise_for_status()
-        result = r.json()
 
-    cache_set(key, result)
-    return result
+    for attempt in range(len(_load_keys()) + 1):
+        with httpx.Client(timeout=20) as client:
+            r = client.get(url, headers=_headers(), params=params)
+
+        # 429 = rate limit por minuto → esperar
+        if r.status_code == 429:
+            logger.warning("Rate limit (429) — esperando 65s")
+            time.sleep(65)
+            continue
+
+        data = r.json()
+        # Detectar límite diario agotado
+        errors = data.get("errors", {})
+        if isinstance(errors, dict) and "requests" in errors:
+            logger.warning(f"Key #{_current_key_idx + 1} agotada: {errors['requests']}")
+            if not _rotate_key():
+                return {"response": []}
+            continue
+
+        r.raise_for_status()
+        cache_set(cache_key, data)
+        return data
+
+    return {"response": []}
 
 
 def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -> list[dict]:
@@ -122,38 +179,109 @@ def get_odds(fixture_id: int) -> tuple[float, float, float]:
     return 2.0, 3.2, 3.5
 
 
-def build_team_stats(team_id: int, team_name: str, last_fixtures: list[dict], injuries: list[dict]) -> TeamStats:
+def get_fixture_statistics(fixture_id: int) -> dict:
+    """Devuelve estadísticas de un fixture: corners, tarjetas, tiros."""
+    data = _get("fixtures/statistics", {"fixture": fixture_id})
+    result = {}
+    for team_data in data.get("response", []):
+        tid = team_data["team"]["id"]
+        stats = {s["type"]: s["value"] for s in team_data.get("statistics", [])}
+        result[tid] = stats
+    return result
+
+
+def _parse_stat(val) -> float:
+    """Convierte valor de estadística a float (puede ser None, int o str)."""
+    if val is None:
+        return 0.0
+    try:
+        return float(str(val).replace("%", ""))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def build_team_stats(
+    team_id: int,
+    team_name: str,
+    last_fixtures: list[dict],
+    injuries: list[dict],
+    fetch_stats: bool = True,
+) -> TeamStats:
     form, scored, conceded = [], [], []
     home_wins = away_wins = home_total = away_total = 0
+    draws = losses = 0
+    over25_count = btts_count = clean_sheets = 0
+
+    corners_list, yellow_list, red_list, shots_list = [], [], [], []
 
     for fix in last_fixtures:
         hid = fix["teams"]["home"]["id"]
         hg = fix["goals"]["home"] or 0
         ag = fix["goals"]["away"] or 0
         is_home = (hid == team_id)
+        team_scored = hg if is_home else ag
+        team_conceded = ag if is_home else hg
 
-        # Forma
         if hg == ag:
-            form.append("D")
+            form.append("D"); draws += 1
         elif (is_home and hg > ag) or (not is_home and ag > hg):
             form.append("W")
         else:
-            form.append("L")
+            form.append("L"); losses += 1
 
-        # Goles
+        scored.append(team_scored)
+        conceded.append(team_conceded)
+
         if is_home:
-            scored.append(hg); conceded.append(ag)
             home_total += 1
             if hg > ag: home_wins += 1
         else:
-            scored.append(ag); conceded.append(hg)
             away_total += 1
             if ag > hg: away_wins += 1
+
+        total_goals = hg + ag
+        if total_goals > 2.5:
+            over25_count += 1
+        if hg > 0 and ag > 0:
+            btts_count += 1
+        if team_conceded == 0:
+            clean_sheets += 1
+
+        # Estadísticas de fixture (corners, tarjetas, tiros) — solo primeros 5 para ahorrar requests
+        if fetch_stats and len(corners_list) < 5:
+            fix_id = fix["fixture"]["id"]
+            try:
+                stats = get_fixture_statistics(fix_id)
+                if team_id in stats:
+                    ts = stats[team_id]
+                    corners_list.append(_parse_stat(ts.get("Corner Kicks")))
+                    yellow_list.append(_parse_stat(ts.get("Yellow Cards")))
+                    red_list.append(_parse_stat(ts.get("Red Cards")))
+                    shots_list.append(_parse_stat(ts.get("Shots on Goal")))
+            except Exception:
+                pass
+
+    n = len(last_fixtures) or 1
+    wins_total = n - draws - losses
 
     goals_scored_avg = sum(scored) / len(scored) if scored else 1.2
     goals_conceded_avg = sum(conceded) / len(conceded) if conceded else 1.2
     home_win_rate = home_wins / home_total if home_total else 0.5
     away_win_rate = away_wins / away_total if away_total else 0.3
+
+    corners_avg = sum(corners_list) / len(corners_list) if corners_list else 4.5
+    corners_against_avg = corners_avg * 0.9  # approx
+    yellow_cards_avg = sum(yellow_list) / len(yellow_list) if yellow_list else 1.8
+    red_cards_avg = sum(red_list) / len(red_list) if red_list else 0.1
+    shots_on_target_avg = sum(shots_list) / len(shots_list) if shots_list else 3.5
+
+    # Moral: weighted last 5
+    weights = [1, 1.5, 2, 2.5, 3]
+    pts_map = {"W": 1, "D": 0.4, "L": 0}
+    last5 = form[-5:]
+    morale_score = sum(pts_map.get(r, 0) * weights[i] for i, r in enumerate(last5))
+    morale_max = sum(weights[:len(last5)])
+    recent_form_score = morale_score / morale_max if morale_max else 0.5
 
     team_injuries = [i for i in injuries if i["team"]["id"] == team_id]
     injured_key = sum(1 for i in team_injuries if i["player"]["reason"] in ["Injury", "Muscle Injury"])
@@ -166,8 +294,20 @@ def build_team_stats(team_id: int, team_name: str, last_fixtures: list[dict], in
         goals_conceded_avg=round(goals_conceded_avg, 2),
         home_win_rate=round(home_win_rate, 2),
         away_win_rate=round(away_win_rate, 2),
+        win_rate_total=round(wins_total / n, 2),
+        draw_rate=round(draws / n, 2),
+        loss_rate=round(losses / n, 2),
+        corners_avg=round(corners_avg, 2),
+        corners_against_avg=round(corners_against_avg, 2),
+        yellow_cards_avg=round(yellow_cards_avg, 2),
+        red_cards_avg=round(red_cards_avg, 2),
+        shots_on_target_avg=round(shots_on_target_avg, 2),
         injured_key_players=injured_key,
         suspended_players=suspended,
+        recent_form_score=round(recent_form_score, 2),
+        clean_sheets_pct=round(clean_sheets / n * 100, 1),
+        over25_pct=round(over25_count / n * 100, 1),
+        btts_pct=round(btts_count / n * 100, 1),
     )
 
 
@@ -216,6 +356,11 @@ def build_match_data(fixture: dict, league_id: int) -> MatchData | None:
         home_stats = build_team_stats(home["id"], home["name"], home_fixtures, injuries)
         away_stats = build_team_stats(away["id"], away["name"], away_fixtures, injuries)
 
+        # H2H over25 y btts
+        h2h_over25 = sum(1 for h in pure_h2h if (h["goals"]["home"] or 0) + (h["goals"]["away"] or 0) > 2.5)
+        h2h_btts = sum(1 for h in pure_h2h if (h["goals"]["home"] or 0) > 0 and (h["goals"]["away"] or 0) > 0)
+        h2h_n = len(pure_h2h) or 1
+
         return MatchData(
             match_id=fix_id,
             league=league_name,
@@ -224,6 +369,8 @@ def build_match_data(fixture: dict, league_id: int) -> MatchData | None:
             h2h_home_wins=h2h_home_wins,
             h2h_away_wins=h2h_away_wins,
             h2h_draws=h2h_draws,
+            h2h_over25_pct=round(h2h_over25 / h2h_n * 100, 1),
+            h2h_btts_pct=round(h2h_btts / h2h_n * 100, 1),
             betano_home_odds=home_odds,
             betano_draw_odds=draw_odds,
             betano_away_odds=away_odds,
