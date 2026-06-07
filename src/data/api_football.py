@@ -48,10 +48,11 @@ def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -
     if not data.get("response"):
         for delta in range(1, 8):
             siguiente = (base + timedelta(days=delta)).isoformat()
-            data = _get("fixtures", {"date": siguiente})
-            if data.get("response"):
+            data_next = _get("fixtures", {"date": siguiente})
+            if data_next.get("response"):
                 logger.info(f"Sin partidos el {target}, usando {siguiente}")
                 target = siguiente
+                data = data_next
                 break
     all_fixtures = data.get("response", [])
     logger.info(f"API devolvió {len(all_fixtures)} partidos para {target}")
