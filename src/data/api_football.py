@@ -95,13 +95,29 @@ def _get(endpoint: str, params: dict) -> dict:
     return {"response": []}
 
 
+def _api_football_exhausted() -> bool:
+    """Detecta si la cuota diaria está agotada sin gastar una request."""
+    cache_key = "fixtures_[('date', 'QUOTA_CHECK')]"
+    # Intentar una request de status liviana para verificar
+    try:
+        data = _get("status", {})
+        reqs = data.get("response", {}).get("requests", {})
+        used = reqs.get("current", 0)
+        limit = reqs.get("limit_day", 100)
+        return used >= limit
+    except Exception:
+        return False
+
+
 def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -> list[dict]:
     from datetime import timedelta
     target = target_date or date.today().isoformat()
 
-    # Si no hay partidos en la fecha exacta, buscar el día más próximo con partidos (hasta 7 días)
+    # Intentar API-Football primero
     base = date.fromisoformat(target)
     data = _get("fixtures", {"date": target})
+
+    # Si quota agotada o sin resultados, intentar días siguientes
     if not data.get("response"):
         for delta in range(1, 8):
             siguiente = (base + timedelta(days=delta)).isoformat()
@@ -111,17 +127,30 @@ def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -
                 target = siguiente
                 data = data_next
                 break
-    all_fixtures = data.get("response", [])
-    logger.info(f"API devolvió {len(all_fixtures)} partidos para {target}")
 
+    all_fixtures = data.get("response", [])
+    logger.info(f"API-Football: {len(all_fixtures)} partidos para {target}")
+
+    # Fallback a football-data.org si API-Football no tiene nada
+    if not all_fixtures:
+        logger.warning("API-Football sin resultados — activando fallback football-data.org")
+        try:
+            from src.data.football_data_org import get_todays_fixtures as fdo_fixtures
+            fdo = fdo_fixtures(target)
+            if fdo:
+                logger.info(f"FDO fallback: {len(fdo)} partidos obtenidos")
+                return fdo
+        except Exception as e:
+            logger.error(f"FDO fallback falló: {e}")
+        return []
+
+    skip_keywords = ["U16", "U15", "U14", "Reserve", "Youth", "Amateur"]
     filtered = []
     for f in all_fixtures:
         lid = f["league"]["id"]
         country = f["league"]["country"]
         fixture_type = f["league"].get("type", "")
         league_name = f["league"].get("name", "")
-        # Excluir categorías muy bajas o femeninas sub-16
-        skip_keywords = ["U16", "U15", "U14", "Reserve", "Youth", "Amateur"]
         if any(k in league_name for k in skip_keywords):
             continue
         if lid in league_ids or fixture_type == "Cup" or country == "World" or fixture_type == "League":
@@ -312,6 +341,11 @@ def build_team_stats(
 
 
 def build_match_data(fixture: dict, league_id: int) -> MatchData | None:
+    # Si el fixture viene de football-data.org, usar su propio builder
+    if fixture.get("_source") == "fdo":
+        from src.data.football_data_org import build_match_data_fdo
+        return build_match_data_fdo(fixture)
+
     try:
         fix_id = fixture["fixture"]["id"]
         home = fixture["teams"]["home"]
