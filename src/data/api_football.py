@@ -142,6 +142,17 @@ def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -
                 return fdo
         except Exception as e:
             logger.error(f"FDO fallback falló: {e}")
+
+        logger.warning("FDO sin resultados — activando fallback ESPN API")
+        try:
+            from src.data.espn_api import get_todays_fixtures as espn_fixtures
+            espn = espn_fixtures(target)
+            if espn:
+                logger.info(f"ESPN fallback: {len(espn)} partidos obtenidos")
+                return espn
+        except Exception as e:
+            logger.error(f"ESPN fallback falló: {e}")
+
         return []
 
     skip_keywords = ["U16", "U15", "U14", "Reserve", "Youth", "Amateur"]
@@ -341,10 +352,13 @@ def build_team_stats(
 
 
 def build_match_data(fixture: dict, league_id: int) -> MatchData | None:
-    # Si el fixture viene de football-data.org, usar su propio builder
     if fixture.get("_source") == "fdo":
         from src.data.football_data_org import build_match_data_fdo
         return build_match_data_fdo(fixture)
+
+    if fixture.get("_source") == "espn":
+        from src.data.espn_api import build_match_data_espn
+        return build_match_data_espn(fixture)
 
     try:
         fix_id = fixture["fixture"]["id"]
