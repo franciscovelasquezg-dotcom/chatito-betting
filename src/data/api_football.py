@@ -49,10 +49,15 @@ def get_todays_fixtures(league_ids: list[int], target_date: str | None = None) -
         lid = f["league"]["id"]
         country = f["league"]["country"]
         fixture_type = f["league"].get("type", "")
-        if lid in league_ids or fixture_type == "Cup" or country == "World":
+        league_name = f["league"].get("name", "")
+        # Excluir categorías muy bajas o femeninas sub-16
+        skip_keywords = ["U16", "U15", "U14", "Reserve", "Youth", "Amateur"]
+        if any(k in league_name for k in skip_keywords):
+            continue
+        if lid in league_ids or fixture_type == "Cup" or country == "World" or fixture_type == "League":
             filtered.append(f)
 
-    logger.info(f"Partidos en ligas configuradas: {len(filtered)}")
+    logger.info(f"Partidos filtrados: {len(filtered)}")
     return filtered
 
 
