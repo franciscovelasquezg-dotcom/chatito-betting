@@ -113,7 +113,7 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     except Exception as e:
         logger.error(f"Error en /analizar: {e}")
-        await update.message.reply_text(f"❌ Error al analizar: {str(e)[:200]}")
+        await update.message.reply_text("❌ Error al analizar el partido. Intenta de nuevo en unos minutos.")
 
 
 async def msg_libre(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -299,7 +299,7 @@ async def _enviar_picks_fecha(update: Update, fecha: str | None) -> None:
 
     except Exception as e:
         logger.error(f"Error en picks por fecha: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+        await update.message.reply_text("❌ Error obteniendo picks. Intenta de nuevo en unos minutos.")
 
 
 def _format_analisis(match, result) -> str:

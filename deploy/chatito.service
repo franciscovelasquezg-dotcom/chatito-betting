@@ -9,7 +9,7 @@ WorkingDirectory=/home/opc/chatito-betting
 ExecStart=/usr/bin/python3 main.py
 Restart=always
 RestartSec=10
-EnvironmentFile=/home/opc/chatito-betting/.env
+EnvironmentFile=/etc/chatito.env
 
 [Install]
 WantedBy=multi-user.target
