@@ -3,6 +3,7 @@ Chatito — Analista de viabilidad de apuestas de fútbol.
 Evalúa cada partido y devuelve un score de confianza 0-100.
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 from loguru import logger

@@ -3,6 +3,7 @@ Cerebro de Chatito — usa Claude API para responder preguntas
 en lenguaje natural basadas en datos de API-Football.
 """
 
+from __future__ import annotations
 import os
 import anthropic
 from loguru import logger

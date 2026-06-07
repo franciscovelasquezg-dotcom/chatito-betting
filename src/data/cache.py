@@ -3,6 +3,7 @@ Caché local en disco para datos de API-Football.
 TTL de 6 horas — evita llamadas repetidas al mismo equipo/fixture.
 """
 
+from __future__ import annotations
 import json
 import os
 import time

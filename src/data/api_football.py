@@ -3,6 +3,7 @@ Cliente para API-Football con caché local y requests optimizados.
 Plan free: 10 req/min — caché reduce llamadas en ~70%.
 """
 
+from __future__ import annotations
 import httpx
 import os
 import time

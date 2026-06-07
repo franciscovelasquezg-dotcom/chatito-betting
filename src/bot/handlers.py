@@ -3,6 +3,7 @@ Handlers de comandos del bot Telegram.
 /start, /analizar, /picks
 """
 
+from __future__ import annotations
 import os
 import asyncio
 from telegram import Update
